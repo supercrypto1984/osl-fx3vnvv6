@@ -18,8 +18,11 @@ RUNS=$(curl -sf -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd
   { echo "skip=false" >> "$GITHUB_OUTPUT"; echo "gate_state=api-error"; exit 0; }
 STATE=$(echo "$RUNS" | GITHUB_RUN_ID="$GITHUB_RUN_ID" python3 - <<'PY'
 import sys, json, datetime, os
-d = json.load(sys.stdin)
-rs = d.get('workflow_runs', [])
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print('api-error'); sys.exit()   # API 数据异常 → 放行（保守：宁可多跑不遗漏）
+rs = d.get('workflow_runs', []) if isinstance(d, dict) else []
 self_id = os.environ.get('GITHUB_RUN_ID')
 others = [r for r in rs if str(r.get('id')) != self_id]
 if not others:
@@ -28,7 +31,10 @@ r = others[0]
 if r.get('status') in ('in_progress', 'pending', 'queued'):
     print('active'); sys.exit()
 if r.get('status') == 'completed':
-    end = datetime.datetime.fromisoformat(r['updated_at'].replace('Z', '+00:00'))
+    try:
+        end = datetime.datetime.fromisoformat(r['updated_at'].replace('Z', '+00:00'))
+    except Exception:
+        print('api-error'); sys.exit()
     mins = int((datetime.datetime.now(datetime.timezone.utc) - end).total_seconds() / 60)
     print(f"{r.get('conclusion')}:{mins}")
 else:
@@ -36,11 +42,11 @@ else:
 PY
 )
 case "$STATE" in
-  none|active) echo "skip=true" >> "$GITHUB_OUTPUT" ;;
+  active) echo "skip=true" >> "$GITHUB_OUTPUT" ;;          # 有其他 run 在跑/排队 → 守护正常，跳过
   success:*)
     m="${STATE#success:}"
     if [ "$m" -lt 10 ]; then echo "skip=true" >> "$GITHUB_OUTPUT"; else echo "skip=false" >> "$GITHUB_OUTPUT"; fi
     ;;
-  *) echo "skip=false" >> "$GITHUB_OUTPUT" ;;
+  *) echo "skip=false" >> "$GITHUB_OUTPUT" ;;              # none/失败/api-error/其他 → 放行兜底
 esac
 echo "gate_state=$STATE"
